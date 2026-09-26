@@ -22,4 +22,8 @@ services:
       - key: OPENAI_MODEL
         value: gpt-4o-mini
       - key: SYSTEM_PROMPT
-        value: You are a helpful WhatsApp assistant. Reply clearly and concisely in the same language as the user.
+        value: You are a helpful WhatsApp assistant. Reply clearly and concisely.
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB
+        value: whatsapp_bot

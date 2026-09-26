@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-chatgpt-bot-official",
-  "version": "1.0.0",
-  "description": "WhatsApp ChatGPT bot using the official Meta Cloud API and OpenAI.",
+  "version": "2.0.0",
+  "description": "Professional WhatsApp ChatGPT bot using Meta Cloud API and OpenAI with MongoDB.",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -14,6 +14,7 @@
   "dependencies": {
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "openai": "^4.104.0"
+    "openai": "^4.104.0",
+    "mongodb": "^6.12.0"
   }
 }
