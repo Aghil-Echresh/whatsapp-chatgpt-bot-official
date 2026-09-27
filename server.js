@@ -29,19 +29,17 @@ let messagesCollection;
 let usersCollection;
 let processedCollection;
 
-// In-memory fallback (for when MongoDB is not available)
 const conversations = new Map();
 const processedMessages = new Map();
 const MAX_HISTORY = 15;
 const MESSAGE_TTL_MS = 24 * 60 * 60 * 1000;
 
-// Initialize MongoDB if connection string is provided
 async function initializeMongo() {
   if (!process.env.MONGODB_URI) {
     console.log('MongoDB URI not provided, using in-memory storage');
     return false;
   }
-  
+
   try {
     mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
@@ -49,14 +47,13 @@ async function initializeMongo() {
     messagesCollection = db.collection('messages');
     usersCollection = db.collection('users');
     processedCollection = db.collection('processed_messages');
-    
-    // Create indexes
+
     await messagesCollection.createIndex({ from: 1, createdAt: -1 });
     await messagesCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 86400 * 30 });
     await usersCollection.createIndex({ phone: 1 }, { unique: true });
     await processedCollection.createIndex({ messageId: 1 }, { unique: true });
     await processedCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 172800 });
-    
+
     console.log('✓ MongoDB connected');
     return true;
   } catch (error) {
@@ -117,7 +114,6 @@ app.get('/health', (_request, response) => {
   response.json({ ok: true, service: 'whatsapp-chatgpt-bot', mongodb: !!mongoClient });
 });
 
-// Meta calls this endpoint once when configuring the webhook.
 app.get('/webhook', (request, response) => {
   const isValid = request.query['hub.mode'] === 'subscribe' &&
     request.query['hub.verify_token'] === verifyToken;
@@ -128,7 +124,6 @@ app.get('/webhook', (request, response) => {
 app.post('/webhook', (request, response) => {
   if (!validSignature(request)) return response.sendStatus(401);
 
-  // Acknowledge quickly; Meta retries webhooks that take too long.
   response.sendStatus(200);
   void processWebhook(request.body).catch((error) => {
     console.error('Webhook processing failed:', error);
@@ -143,8 +138,7 @@ async function processWebhook(body) {
       const value = change.value;
       const senderPhone = value?.contacts?.[0]?.wa_id;
       const senderName = value?.contacts?.[0]?.profile?.name;
-      
-      // Track user
+
       if (senderPhone && usersCollection) {
         await usersCollection.updateOne(
           { phone: senderPhone },
@@ -152,12 +146,11 @@ async function processWebhook(body) {
           { upsert: true }
         ).catch(() => {});
       }
-      
+
       for (const message of value?.messages || []) {
         if (!message.id) continue;
         if (await isMessageProcessed(message.id)) continue;
 
-        // Handle different message types
         if (message.type === 'text') {
           const text = message.text?.body?.trim();
           if (text) await answerMessage(message.from, text);
@@ -183,22 +176,18 @@ async function getConversationHistory(from) {
         .sort({ createdAt: -1 })
         .limit(MAX_HISTORY)
         .toArray();
-      return messages.reverse().map(m => ({
-        role: m.role,
-        content: m.content
-      }));
+      return messages.reverse().map(m => ({ role: m.role, content: m.content }));
     } catch (error) {
       console.warn('Failed to fetch history from MongoDB:', error.message);
     }
   }
-  
-  // Fallback to in-memory
+
   return conversations.get(from) || [];
 }
 
 async function saveMessage(from, role, content) {
   const message = { from, role, content, createdAt: new Date() };
-  
+
   if (messagesCollection) {
     try {
       await messagesCollection.insertOne(message);
@@ -206,8 +195,7 @@ async function saveMessage(from, role, content) {
       console.warn('Failed to save message to MongoDB:', error.message);
     }
   }
-  
-  // Also keep in-memory
+
   const history = conversations.get(from) || [];
   const updated = [...history, message].slice(-MAX_HISTORY);
   conversations.set(from, updated);
@@ -220,16 +208,13 @@ async function answerMessage(from, text) {
   }
 
   const history = await getConversationHistory(from);
-  
-  // Detect language
   const isArabicOrFarsi = /[\u0600-\u06FF]/.test(text);
   const language = isArabicOrFarsi ? 'Persian' : 'English';
   const customPrompt = `${systemPrompt} Always respond in ${language}.`;
-  
+
   try {
-    // Show typing indicator
     await sendTypingIndicator(from);
-    
+
     const completion = await openai.chat.completions.create({
       model,
       temperature: 0.7,
@@ -240,7 +225,7 @@ async function answerMessage(from, text) {
         { role: 'user', content: text }
       ]
     });
-    
+
     const answer = completion.choices[0]?.message?.content?.trim() ||
       'متأسفم، در حال حاضر نتوانستم پاسخ منسجمی تولید کنم.';
 
@@ -249,7 +234,7 @@ async function answerMessage(from, text) {
     await sendWhatsAppMessage(from, answer);
   } catch (error) {
     console.error('OpenAI/API error:', error?.response?.data || error.message || error);
-    const errorMsg = error?.status === 429 
+    const errorMsg = error?.status === 429
       ? 'متأسفم، سرویس اکنون مشغول است. لطفاً بعد از کمی فاصله دوباره تلاش کنید.'
       : 'متأسفم، مشکلی پیش آمد. لطفاً چند لحظه بعد دوباره تلاش کنید.';
     await sendWhatsAppMessage(from, errorMsg);
@@ -316,13 +301,12 @@ async function sendWhatsAppMessage(to, body) {
   }
 }
 
-// API endpoint to get user stats
 app.get('/api/users/:phone/stats', async (request, response) => {
   if (!requireAdmin(request, response)) return;
   if (!messagesCollection) {
     return response.json({ error: 'MongoDB not available' });
   }
-  
+
   const { phone } = request.params;
   try {
     const user = await usersCollection.findOne({ phone });
@@ -333,16 +317,15 @@ app.get('/api/users/:phone/stats', async (request, response) => {
   }
 });
 
-// API endpoint to get conversation history
 app.get('/api/messages/:phone', async (request, response) => {
   if (!requireAdmin(request, response)) return;
   if (!messagesCollection) {
     return response.json({ error: 'MongoDB not available' });
   }
-  
+
   const { phone } = request.params;
   const limit = Number(request.query.limit || 50);
-  
+
   try {
     const messages = await messagesCollection
       .find({ from: phone })
@@ -355,7 +338,6 @@ app.get('/api/messages/:phone', async (request, response) => {
   }
 });
 
-// Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('Shutting down...');
   if (mongoClient) {
@@ -366,7 +348,7 @@ process.on('SIGINT', async () => {
 
 (async () => {
   await initializeMongo();
-  app.listen(port, () => {
+  app.listen(port, '0.0.0.0', () => {
     console.log(`Server listening on port ${port}`);
   });
 })();
