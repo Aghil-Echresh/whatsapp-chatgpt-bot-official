@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="fa">
+<head>
+    <meta charset="UTF-8">
+    <title>دستیار هوش مصنوعی – چت حرفه‌ای</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        :root {
+            --bg: #020617;
+            --panel: #020617;
+            --border: #1f2937;
+            --accent: #22c55e;
+            --accent-soft: rgba(34, 197, 94, 0.12);
+            --user: #2563eb;
+            --ai: #0f172a;
+            --text: #e5e7eb;
+            --muted: #9ca3af;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: system-ui, -apple-system, sans-serif;
+            background: radial-gradient(circle at top, #0b1120 0, #020617 45%);
+            color: var(--text);
+            display: flex;
+            justify-content: center;
+            min-height: 100vh;
+        }
+        .app {
+            width: 100%;
+            max-width: 960px;
+            display: flex;
+            flex-direction: column;
+            padding: 16px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 16px;
+            border-radius: 16px;
+            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(16px);
+            margin-bottom: 12px;
+        }
+        .brand {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .brand-title {
+            font-weight: 600;
+            letter-spacing: 0.03em;
+        }
+        .brand-sub {
+            font-size: 12px;
+            color: var(--muted);
+        }
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            background: var(--accent);
+            box-shadow: 0 0 12px var(--accent-soft);
+        }
+
+        .chat-shell {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            border-radius: 18px;
+            border: 1px solid var(--border);
+            background: linear-gradient(145deg, #020617 0, #020617 40%, #0b1120 100%);
+            overflow: hidden;
+            min-height: 420px;
+        }
+        .chat-body {
+            flex: 1;
+            padding: 16px;
+            overflow-y: auto;
+        }
+        .msg-row {
+            display: flex;
+            margin-bottom: 12px;
+        }
+        .msg-row.user { justify-content: flex-end; }
+        .msg-row.ai { justify-content: flex-start; }
+
+        .avatar {
+            width: 28px;
+            height: 28px;
+            border-radius: 999px;
+            background: #020617;
+            border: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            margin-inline-end: 8px;
+            flex-shrink: 0;
+        }
+        .avatar.ai {
+            background: radial-gradient(circle at top, #22c55e 0, #16a34a 40%, #0b1120 100%);
+            color: #020617;
+        }
+        .avatar.user {
+            background: radial-gradient(circle at top, #2563eb 0, #1d4ed8 40%, #0b1120 100%);
+        }
+
+        .bubble {
+            max-width: 72%;
+            padding: 10px 14px;
+            border-radius: 16px;
+            font-size: 14px;
+            line-height: 1.7;
+            position: relative;
+        }
+        .bubble.ai {
+            background: var(--ai);
+            border: 1px solid #1f2937;
+        }
+        .bubble.user {
+            background: var(--user);
+        }
+        .meta {
+            font-size: 11px;
+            color: var(--muted);
+            margin-bottom: 4px;
+        }
+
+        .typing {
+            display: inline-flex;
+            gap: 4px;
+        }
+        .typing span {
+            width: 4px;
+            height: 4px;
+            border-radius: 999px;
+            background: var(--muted);
+            animation: blink 1s infinite ease-in-out;
+        }
+        .typing span:nth-child(2) { animation-delay: 0.2s; }
+        .typing span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes blink {
+            0%, 100% { opacity: 0.3; transform: translateY(0); }
+            50% { opacity: 1; transform: translateY(-2px); }
+        }
+
+        .chat-footer {
+            border-top: 1px solid var(--border);
+            padding: 10px 12px;
+            background: rgba(15, 23, 42, 0.9);
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .input-row {
+            display: flex;
+            gap: 8px;
+        }
+        textarea {
+            flex: 1;
+            resize: none;
+            padding: 10px 12px;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            background: #020617;
+            color: var(--text);
+            font-family: inherit;
+            font-size: 14px;
+            min-height: 60px;
+        }
+        textarea::placeholder {
+            color: #6b7280;
+        }
+        button {
+            padding: 0 18px;
+            border-radius: 12px;
+            border: none;
+            background: var(--accent);
+            color: #020617;
+            font-weight: 600;
+            cursor: pointer;
+            white-space: nowrap;
+            font-size: 14px;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
+        .hint {
+            font-size: 11px;
+            color: var(--muted);
+            display: flex;
+            justify-content: space-between;
+        }
+        .hint span:last-child {
+            color: #6ee7b7;
+        }
+
+        @media (max-width: 640px) {
+            .bubble { max-width: 100%; }
+            .header { padding: 10px 12px; }
+            .chat-shell { min-height: 380px; }
+        }
+    </style>
+</head>
+<body>
+<div class="app">
+    <div class="header">
+        <div class="brand">
+            <div class="brand-title">AI Prompt Studio</div>
+            <div class="brand-sub">چت حرفه‌ای با Cloudflare Worker اختصاصی تو</div>
+        </div>
+        <div class="status">
+            <div class="dot"></div>
+            <span>متصل به Worker</span>
+        </div>
+    </div>
+
+    <div class="chat-shell">
+        <div id="chatBody" class="chat-body">
+            <div class="msg-row ai">
+                <div class="avatar ai">🤖</div>
+                <div class="bubble ai">
+                    <div class="meta">دستیار هوش مصنوعی</div>
+                    <div>سلام عقیل، هر پرامپتی برای متن، صدا یا ایده داری بنویس؛ من از طریق Cloudflare Worker جوابش رو برات می‌سازم ✨</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="chat-footer">
+            <div class="input-row">
+                <textarea id="promptInput" placeholder="مثلاً: یک متن تبلیغاتی احساسی برای سوپرمارکت کامیل بنویس..."></textarea>
+                <button id="sendBtn">ارسال</button>
+            </div>
+            <div class="hint">
+                <span>Enter = ارسال، Shift+Enter = خط جدید</span>
+                <span>پاسخ از: ai-voice-worker.aghilechresh83.workers.dev</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+const WORKER_URL = "https://ai-voice-worker.aghilechresh83.workers.dev/";
+const chatBody = document.getElementById("chatBody");
+const promptInput = document.getElementById("promptInput");
+const sendBtn = document.getElementById("sendBtn");
+
+function addMessage(text, role, options = {}) {
+    const row = document.createElement("div");
+    row.className = "msg-row " + role;
+
+    const avatar = document.createElement("div");
+    avatar.className = "avatar " + role;
+    avatar.textContent = role === "ai" ? "🤖" : "👤";
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble " + role;
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = role === "ai" ? "دستیار هوش مصنوعی" : "شما";
+
+    const content = document.createElement("div");
+    content.textContent = text;
+
+    bubble.appendChild(meta);
+    bubble.appendChild(content);
+
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+    chatBody.appendChild(row);
+    chatBody.scrollTop = chatBody.scrollHeight;
+
+    if (options.typing) {
+        const typing = document.createElement("div");
+        typing.className = "typing";
+        typing.innerHTML = "<span></span><span></span><span></span>";
+        content.textContent = "";
+        content.appendChild(typing);
+        return { row, bubble, content, typing };
+    }
+
+    return { row, bubble, content };
+}
+
+async function sendPrompt() {
+    const prompt = promptInput.value.trim();
+    if (!prompt) return;
+
+    addMessage(prompt, "user");
+    promptInput.value = "";
+    promptInput.focus();
+
+    sendBtn.disabled = true;
+    sendBtn.textContent = "در حال تولید...";
+
+    const typingMsg = addMessage("در حال تولید پاسخ...", "ai", { typing: true });
+
+    try {
+        const res = await fetch(WORKER_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message: prompt })
+        });
+
+        const data = await res.json();
+        const reply = data.reply || "پاسخی از Worker دریافت نشد.";
+
+        typingMsg.content.textContent = reply;
+    } catch (e) {
+        typingMsg.content.textContent = "خطا در ارتباط با Cloudflare Worker. لطفاً بعداً دوباره تلاش کن.";
+    } finally {
+        sendBtn.disabled = false;
+        sendBtn.textContent = "ارسال";
+        chatBody.scrollTop = chatBody.scrollHeight;
+    }
+}
+
+sendBtn.addEventListener("click", sendPrompt);
+
+promptInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendPrompt();
+    }
+});
+</script>
+</body>
+  </html>
