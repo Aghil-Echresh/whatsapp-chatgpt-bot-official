@@ -42,6 +42,7 @@ WHATSAPP_TOKEN=your_permanent_access_token
 PHONE_NUMBER_ID=your_phone_number_id
 VERIFY_TOKEN=your_secure_webhook_token
 META_APP_SECRET=your_app_secret
+ADMIN_API_TOKEN=your_long_random_admin_token
 OPENAI_API_KEY=your_openai_key
 MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net/?retryWrites=true
 MONGODB_DB=whatsapp_bot
@@ -97,6 +98,10 @@ curl http://localhost:3000/health
    - `MONGODB_URI`
 4. Deploy کنید
 5. از دسترسی به webhook آپ شما اطمینان حاصل کنید
+
+## امنیت API مدیریت
+
+مسیرهای `/api/users/*` و `/api/messages/*` با `ADMIN_API_TOKEN` محافظت می‌شوند. درخواست‌ها باید هدر `Authorization: Bearer YOUR_ADMIN_API_TOKEN` را داشته باشند. همچنین هر شماره واتساپ حداکثر ۱۰ پیام در دقیقه می‌تواند پردازش کند و شناسه پیام‌ها برای جلوگیری از پردازش تکراری در MongoDB ثبت می‌شوند.
 
 ## استفاده
 
