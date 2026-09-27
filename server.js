@@ -18,6 +18,7 @@ const whatsappToken = process.env.WHATSAPP_TOKEN;
 const phoneNumberId = process.env.PHONE_NUMBER_ID;
 const verifyToken = process.env.VERIFY_TOKEN;
 const appSecret = process.env.META_APP_SECRET;
+const adminApiToken = process.env.ADMIN_API_TOKEN;
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const systemPrompt = process.env.SYSTEM_PROMPT ||
@@ -26,6 +27,7 @@ const systemPrompt = process.env.SYSTEM_PROMPT ||
 let mongoClient;
 let messagesCollection;
 let usersCollection;
+let processedCollection;
 
 // In-memory fallback (for when MongoDB is not available)
 const conversations = new Map();
@@ -46,11 +48,14 @@ async function initializeMongo() {
     const db = mongoClient.db(process.env.MONGODB_DB || 'whatsapp_bot');
     messagesCollection = db.collection('messages');
     usersCollection = db.collection('users');
+    processedCollection = db.collection('processed_messages');
     
     // Create indexes
     await messagesCollection.createIndex({ from: 1, createdAt: -1 });
     await messagesCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 86400 * 30 });
     await usersCollection.createIndex({ phone: 1 }, { unique: true });
+    await processedCollection.createIndex({ messageId: 1 }, { unique: true });
+    await processedCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 172800 });
     
     console.log('✓ MongoDB connected');
     return true;
@@ -75,6 +80,37 @@ function validSignature(request) {
     Buffer.from(signature),
     Buffer.from(expected)
   );
+}
+
+function requireAdmin(request, response) {
+  if (!adminApiToken) {
+    response.status(503).json({ error: 'Admin API is not configured' });
+    return false;
+  }
+  const provided = request.get('authorization')?.replace(/^Bearer\s+/i, '');
+  if (!provided || provided.length !== adminApiToken.length) {
+    response.status(401).json({ error: 'Unauthorized' });
+    return false;
+  }
+  const valid = crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(adminApiToken));
+  if (!valid) response.status(401).json({ error: 'Unauthorized' });
+  return valid;
+}
+
+const rateLimit = new Map();
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const RATE_LIMIT_MAX = 10;
+
+function allowRequest(phone) {
+  const now = Date.now();
+  const current = rateLimit.get(phone);
+  if (!current || now - current.startedAt >= RATE_LIMIT_WINDOW_MS) {
+    rateLimit.set(phone, { startedAt: now, count: 1 });
+    return true;
+  }
+  if (current.count >= RATE_LIMIT_MAX) return false;
+  current.count += 1;
+  return true;
 }
 
 app.get('/health', (_request, response) => {
@@ -118,9 +154,8 @@ async function processWebhook(body) {
       }
       
       for (const message of value?.messages || []) {
-        if (processedMessages.has(message.id)) continue;
-        processedMessages.set(message.id, Date.now());
-        setTimeout(() => processedMessages.delete(message.id), MESSAGE_TTL_MS);
+        if (!message.id) continue;
+        if (await isMessageProcessed(message.id)) continue;
 
         // Handle different message types
         if (message.type === 'text') {
@@ -179,6 +214,11 @@ async function saveMessage(from, role, content) {
 }
 
 async function answerMessage(from, text) {
+  if (!allowRequest(from)) {
+    await sendWhatsAppMessage(from, '⏳ تعداد پیام‌ها در این دقیقه زیاد است. لطفاً کمی بعد دوباره تلاش کنید.');
+    return;
+  }
+
   const history = await getConversationHistory(from);
   
   // Detect language
@@ -237,6 +277,22 @@ async function sendTypingIndicator(to) {
   }
 }
 
+async function isMessageProcessed(messageId) {
+  if (processedCollection) {
+    try {
+      await processedCollection.insertOne({ messageId, createdAt: new Date() });
+      return false;
+    } catch (error) {
+      if (error?.code === 11000) return true;
+      console.warn('Failed to persist message deduplication:', error.message);
+    }
+  }
+  if (processedMessages.has(messageId)) return true;
+  processedMessages.set(messageId, Date.now());
+  setTimeout(() => processedMessages.delete(messageId), MESSAGE_TTL_MS);
+  return false;
+}
+
 async function sendWhatsAppMessage(to, body) {
   const url = `https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`;
   const result = await fetch(url, {
@@ -262,6 +318,7 @@ async function sendWhatsAppMessage(to, body) {
 
 // API endpoint to get user stats
 app.get('/api/users/:phone/stats', async (request, response) => {
+  if (!requireAdmin(request, response)) return;
   if (!messagesCollection) {
     return response.json({ error: 'MongoDB not available' });
   }
@@ -278,6 +335,7 @@ app.get('/api/users/:phone/stats', async (request, response) => {
 
 // API endpoint to get conversation history
 app.get('/api/messages/:phone', async (request, response) => {
+  if (!requireAdmin(request, response)) return;
   if (!messagesCollection) {
     return response.json({ error: 'MongoDB not available' });
   }
