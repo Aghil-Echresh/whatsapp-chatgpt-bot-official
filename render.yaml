@@ -6,7 +6,10 @@ services:
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /health
+    autoDeployTrigger: commit
     envVars:
+      - key: NODE_ENV
+        value: production
       - key: WHATSAPP_TOKEN
         sync: false
       - key: PHONE_NUMBER_ID
