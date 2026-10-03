@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import express from 'express';
 import OpenAI from 'openai';
 import { MongoClient } from 'mongodb';
+import { toFile } from 'openai/uploads';
 
 const required = ['WHATSAPP_TOKEN', 'PHONE_NUMBER_ID', 'VERIFY_TOKEN', 'OPENAI_API_KEY'];
 const missing = required.filter((name) => !process.env[name]);
@@ -20,7 +21,9 @@ const verifyToken = process.env.VERIFY_TOKEN;
 const appSecret = process.env.META_APP_SECRET;
 const adminApiToken = process.env.ADMIN_API_TOKEN;
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const model = process.env.OPENAI_MODEL || 'gpt-5';
+const transcriptionModel = process.env.OPENAI_TRANSCRIPTION_MODEL || 'gpt-4o-mini-transcribe';
+const MAX_MEDIA_BYTES = Number(process.env.MAX_MEDIA_BYTES || 15 * 1024 * 1024);
 const systemPrompt = process.env.SYSTEM_PROMPT ||
   'You are a helpful WhatsApp assistant. Reply clearly and concisely in the same language as the user.';
 
@@ -31,7 +34,7 @@ let processedCollection;
 
 const conversations = new Map();
 const processedMessages = new Map();
-const MAX_HISTORY = 15;
+const MAX_HISTORY = Number(process.env.MAX_HISTORY || 20);
 const MESSAGE_TTL_MS = 24 * 60 * 60 * 1000;
 
 async function initializeMongo() {
@@ -96,7 +99,17 @@ function requireAdmin(request, response) {
 
 const rateLimit = new Map();
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const RATE_LIMIT_MAX = 10;
+
+function queueFor(phone, task) {
+  const previous = userQueues.get(phone) || Promise.resolve();
+  const next = previous.catch(() => {}).then(task);
+  userQueues.set(phone, next);
+  next.finally(() => { if (userQueues.get(phone) === next) userQueues.delete(phone); }).catch(() => {});
+  return next;
+}
+
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 10);
+const userQueues = new Map();
 
 function allowRequest(phone) {
   const now = Date.now();
@@ -151,18 +164,26 @@ async function processWebhook(body) {
         if (!message.id) continue;
         if (await isMessageProcessed(message.id)) continue;
 
-        if (message.type === 'text') {
-          const text = message.text?.body?.trim();
-          if (text) await answerMessage(message.from, text);
-        } else if (message.type === 'image') {
-          await sendWhatsAppMessage(message.from, '📸 I received an image, but I can only process text messages for now.');
-        } else if (message.type === 'document') {
-          await sendWhatsAppMessage(message.from, '📄 I received a document, but I can only process text messages for now.');
-        } else if (message.type === 'audio') {
-          await sendWhatsAppMessage(message.from, '🎤 I received an audio message, but I can only process text messages for now.');
-        } else {
-          await sendWhatsAppMessage(message.from, 'فعلاً فقط پیام‌های متنی را پشتیبانی می‌کنم.');
-        }
+        if (!message.from) continue;
+        await queueFor(message.from, async () => {
+          try {
+            if (message.type === 'text') {
+              const text = message.text?.body?.trim();
+              if (text) await answerMessage(message.from, text);
+            } else if (message.type === 'image') {
+              await answerMediaMessage(message.from, 'image', message.image?.id, message.image?.caption?.trim() || 'این تصویر را بررسی کن و توضیح بده.');
+            } else if (message.type === 'audio') {
+              await answerMediaMessage(message.from, 'audio', message.audio?.id);
+            } else if (message.type === 'document') {
+              await answerMediaMessage(message.from, 'document', message.document?.id, message.document?.caption?.trim() || 'این فایل را بررسی کن و نکات مهمش را توضیح بده.', message.document?.filename);
+            } else {
+              await sendWhatsAppMessage(message.from, 'فعلاً پیام‌های متنی، عکس، فایل و صوتی را پشتیبانی می‌کنم. 📎');
+            }
+          } catch (error) {
+            console.error('Message processing failed:', error);
+            await safeSend(message.from, 'متأسفم، در پردازش پیام مشکلی پیش آمد. لطفاً دوباره تلاش کن.');
+          }
+        });
       }
     }
   }
@@ -207,38 +228,131 @@ async function answerMessage(from, text) {
     return;
   }
 
-  const history = await getConversationHistory(from);
-  const isArabicOrFarsi = /[\u0600-\u06FF]/.test(text);
-  const language = isArabicOrFarsi ? 'Persian' : 'English';
-  const customPrompt = `${systemPrompt} Always respond in ${language}.`;
+  if (/^\\/(reset|new|شروع)\\b/i.test(text)) {
+    await resetConversation(from);
+    await sendWhatsAppMessage(from, '♻️ گفت‌وگوی قبلی پاک شد. از نو شروع کنیم؟');
+    return;
+  }
+
+  if (/^(سلام|درود|hello|hi|hey)\\s*[!؟?]*$/iu.test(text)) {
+    const welcome = /[\\u0600-\\u06FF]/.test(text)
+      ? 'سلام 👋 من دستیار هوش مصنوعی واتساپ هستم. متن، عکس، فایل و پیام صوتی بفرست.'
+      : 'Hi 👋 I am your WhatsApp AI assistant. Send text, images, files or voice messages.';
+    await saveMessage(from, 'user', text);
+    await saveMessage(from, 'assistant', welcome);
+    await sendWhatsAppMessage(from, welcome);
+    return;
+  }
 
   try {
     await sendTypingIndicator(from);
-
-    const completion = await openai.chat.completions.create({
+    const history = await getConversationHistory(from);
+    const response = await openai.responses.create({
       model,
-      temperature: 0.7,
-      max_tokens: 700,
-      messages: [
-        { role: 'system', content: customPrompt },
-        ...history,
-        { role: 'user', content: text }
-      ]
+      instructions: `${systemPrompt}\\nAlways answer in the user's language. If the user writes Persian, use natural everyday Persian.`,
+      input: [...history, { role: 'user', content: text }]
     });
 
-    const answer = completion.choices[0]?.message?.content?.trim() ||
-      'متأسفم، در حال حاضر نتوانستم پاسخ منسجمی تولید کنم.';
-
+    const answer = response.output_text?.trim() || 'متأسفم، نتوانستم پاسخ مناسبی تولید کنم.';
     await saveMessage(from, 'user', text);
     await saveMessage(from, 'assistant', answer);
     await sendWhatsAppMessage(from, answer);
   } catch (error) {
     console.error('OpenAI/API error:', error?.response?.data || error.message || error);
     const errorMsg = error?.status === 429
-      ? 'متأسفم، سرویس اکنون مشغول است. لطفاً بعد از کمی فاصله دوباره تلاش کنید.'
+      ? '⏳ سرویس هوش مصنوعی فعلاً شلوغ است. کمی بعد دوباره تلاش کنید.'
       : 'متأسفم، مشکلی پیش آمد. لطفاً چند لحظه بعد دوباره تلاش کنید.';
-    await sendWhatsAppMessage(from, errorMsg);
+    await safeSend(from, errorMsg);
   }
+}
+
+async function answerMediaMessage(from, type, mediaId, prompt = '', filename = null) {
+  if (!allowRequest(from)) {
+    await sendWhatsAppMessage(from, '⏳ تعداد پیام‌ها در این دقیقه زیاد است. کمی بعد دوباره تلاش کنید.');
+    return;
+  }
+
+  try {
+    await sendTypingIndicator(from);
+    const history = await getConversationHistory(from);
+    let userText = prompt;
+    let content;
+
+    const media = await downloadWhatsAppMedia(mediaId);
+
+    if (type === 'image') {
+      const dataUrl = bufferToDataUrl(media.buffer, media.mimeType);
+      content = [
+        { type: 'input_text', text: prompt || 'این تصویر را بررسی کن.' },
+        { type: 'input_image', image_url: dataUrl, detail: 'auto' }
+      ];
+    } else if (type === 'document') {
+      const dataUrl = bufferToDataUrl(media.buffer, media.mimeType);
+      content = [
+        { type: 'input_text', text: prompt || 'این فایل را بررسی کن.' },
+        { type: 'input_file', filename: filename || media.filename || 'document', file_data: dataUrl }
+      ];
+    } else if (type === 'audio') {
+      const file = await toFile(media.buffer, media.filename || 'voice.ogg', { type: media.mimeType });
+      const transcription = await openai.audio.transcriptions.create({
+        file,
+        model: transcriptionModel
+      });
+      userText = transcription.text?.trim() || '';
+      if (!userText) {
+        await sendWhatsAppMessage(from, '🎤 صدای دریافتی قابل تشخیص نبود. لطفاً دوباره ارسال کنید.');
+        return;
+      }
+      content = `پیام صوتی کاربر به متن تبدیل شده است: ${userText}`;
+    }
+
+    const response = await openai.responses.create({
+      model,
+      instructions: `${systemPrompt}\\nAlways answer in the user's language. If the user writes Persian, use natural everyday Persian.`,
+      input: [...history, { role: 'user', content }]
+    });
+
+    const answer = response.output_text?.trim() || 'متأسفم، نتوانستم پاسخ مناسبی تولید کنم.';
+    await saveMessage(from, 'user', type === 'audio' ? `[پیام صوتی] ${userText}` : (prompt || `[پیام ${type}]`));
+    await saveMessage(from, 'assistant', answer);
+    await sendWhatsAppMessage(from, answer);
+  } catch (error) {
+    console.error('OpenAI/media error:', error?.response?.data || error.message || error);
+    await safeSend(from, 'متأسفم، پردازش این فایل با مشکل روبه‌رو شد. لطفاً دوباره ارسال کنید.');
+  }
+}
+
+async function resetConversation(from) {
+  conversations.delete(from);
+  if (messagesCollection) await messagesCollection.deleteMany({ from }).catch(() => {});
+}
+
+async function getWhatsAppMediaUrl(mediaId) {
+  if (!mediaId) throw new Error('Missing WhatsApp media id');
+  const result = await fetch(`https://graph.facebook.com/${graphVersion}/${mediaId}`, {
+    headers: { Authorization: `Bearer ${whatsappToken}` }
+  });
+  if (!result.ok) throw new Error(`WhatsApp media metadata failed (${result.status}): ${await result.text()}`);
+  const data = await result.json();
+  if (!data.url) throw new Error('WhatsApp media URL was not returned');
+  return { url: data.url, mimeType: data.mime_type || 'application/octet-stream', filename: data.filename || null };
+}
+
+async function downloadWhatsAppMedia(mediaId) {
+  const meta = await getWhatsAppMediaUrl(mediaId);
+  const result = await fetch(meta.url, { headers: { Authorization: `Bearer ${whatsappToken}` } });
+  if (!result.ok) throw new Error(`WhatsApp media download failed (${result.status})`);
+  const buffer = Buffer.from(await result.arrayBuffer());
+  if (buffer.length > MAX_MEDIA_BYTES) throw new Error('Media exceeds MAX_MEDIA_BYTES');
+  return { buffer, mimeType: meta.mimeType, filename: meta.filename };
+}
+
+function bufferToDataUrl(buffer, mimeType) {
+  return `data:${mimeType};base64,${buffer.toString('base64')}`;
+}
+
+async function safeSend(to, body) {
+  try { await sendWhatsAppMessage(to, body); } catch (error) { console.error('WhatsApp response failed:', error.message); }
 }
 
 async function sendTypingIndicator(to) {
@@ -324,7 +438,7 @@ app.get('/api/messages/:phone', async (request, response) => {
   }
 
   const { phone } = request.params;
-  const limit = Number(request.query.limit || 50);
+  const limit = Math.min(Number(request.query.limit || 50), 200);
 
   try {
     const messages = await messagesCollection
