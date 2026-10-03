@@ -27,7 +27,7 @@ jobs:
         run: npm install
 
       - name: Check JavaScript syntax
-        run: node --check server.js
+        run: npm run check
 
       - name: Check package scripts
         run: npm run --if-present
