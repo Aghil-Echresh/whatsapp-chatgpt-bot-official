@@ -1,0 +1,56 @@
+name: WhatsApp Bot CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: whatsapp-bot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate WhatsApp bot
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check JavaScript syntax
+        run: node --check server.js
+
+      - name: Verify package
+        run: npm run --if-present
+
+      - name: Verify required project files
+        run: |
+          test -f server.js
+          test -f package.json
+          test -f render.yaml
+          echo "WhatsApp bot project files are present."
+
+  deploy-ready:
+    name: Deployment gate
+    needs: validate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Deployment gate passed
+        run: |
+          echo "GitHub Actions validation passed."
+          echo "Render can deploy this commit after checks pass."
