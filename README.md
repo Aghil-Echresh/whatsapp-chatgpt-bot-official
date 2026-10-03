@@ -5,7 +5,7 @@
 ## ویژگی‌ها
 
 ✅ **WhatsApp Cloud API رسمی** — بدون نیاز به تقلب یا کتابخانه‌های غیررسمی
-✅ **OpenAI Integration** — پاسخ‌های هوشمند و طبیعی
+✅ **OpenAI Responses API** — پاسخ‌های هوشمند و طبیعی
 ✅ **MongoDB** — ذخیره تاریخچه پیام‌ها و اطلاعات کاربران
 ✅ **پشتیبانی چندزبانه** — تشخیص خودکار زبان (فارسی، انگلیسی، و...)
 ✅ **Typing Indicator** — نشانگر تایپ برای بهتر بودن تجربه
@@ -163,7 +163,7 @@ curl "http://localhost:3000/api/messages/1234567890?limit=50"
 - [ ] **Caching** برای پاسخ‌های مشابه
 - [ ] **Analytics Dashboard** برای مدیریت
 - [ ] **Multi-language Support** پیشرفته‌تر
-- [ ] **Handle Media** (صور، ویدیو، فایل)
+- [x] **Handle Media** (عکس، فایل، پیام صوتی)
 - [ ] **Interactive Messages** (Button، List)
 
 ## حل مشکلات
@@ -195,3 +195,4 @@ MIT
 ## تماس و پشتیبانی
 
 https://github.com/Aghil-Echresh/whatsapp-chatgpt-bot-official/issues
+\n\n## قابلیت‌های نسخه 3.0\n\n- پیام متنی\n- تحلیل تصویر\n- تبدیل پیام صوتی به متن و پاسخ هوشمند\n- تحلیل فایل/PDF قابل پشتیبانی\n- حافظه مکالمه و دستور `/reset`\n- صف پردازش برای جلوگیری از پاسخ‌های همزمان یک کاربر\n- استفاده از OpenAI Responses API\n\n> نکته: کلیدهای Meta و OpenAI را فقط در Environment Variables سرویس استقرار وارد کنید و هرگز در GitHub commit نکنید.\n
