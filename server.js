@@ -470,8 +470,8 @@ async function answerMessage(from, text, { saveUser = true } = {}) {
     return;
   }
 
-  if (/^(سلام|درود|hello|hi|hey)\\s*[!؟?]*$/iu.test(text)) {
-    const welcome = /[\\u0600-\\u06FF]/.test(text)
+  if (/^(سلام|درود|hello|hi|hey)\s*[!؟?]*$/iu.test(text)) {
+    const welcome = /[\u0600-\u06FF]/.test(text)
       ? 'سلام 👋 من دستیار هوش مصنوعی واتساپ هستم. متن، عکس، فایل و پیام صوتی بفرست.'
       : 'Hi 👋 I am your WhatsApp AI assistant. Send text, images, files or voice messages.';
     if (saveUser) await saveMessage(from, 'user', text);
@@ -485,7 +485,7 @@ async function answerMessage(from, text, { saveUser = true } = {}) {
     const history = await getConversationHistory(from);
     const response = await openai.responses.create({
       model,
-      instructions: `${systemPrompt}\\nAlways answer in the user's language. If the user writes Persian, use natural everyday Persian.`,
+      instructions: `${systemPrompt}\nAlways answer in the user's language. If the user writes Persian, use natural everyday Persian.`,
       input: [...history, { role: 'user', content: text }]
     });
 
