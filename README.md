@@ -1,6 +1,49 @@
-# WhatsApp ChatGPT Bot (Meta Cloud API) - v2.0
+# WhatsApp ChatGPT Bot (YCloud + WhatsApp + ChatGPT) - v3.1
 
 **ربات واتساپ + ChatGPT رسمی** با Meta Cloud API و OpenAI — حرفه‌ای‌تر، با MongoDB برای ذخیره تاریخچه و مدیریت کاربران.
+
+**حالت اصلی پروژه اکنون YCloud است** و مسیر ارسال و دریافت پیام واتساپ از YCloud انجام می‌شود؛ اتصال مستقیم Meta همچنان به‌عنوان fallback با `WHATSAPP_PROVIDER=meta` حفظ شده است.
+
+## اتصال YCloud
+
+### متغیرهای ضروری Render
+- `WHATSAPP_PROVIDER=ycloud`
+- `YCLOUD_API_KEY`
+- `YCLOUD_SENDER_PHONE` (شماره کسب‌وکار در قالب E.164)
+- `YCLOUD_WEBHOOK_SECRET`
+- `YCLOUD_WEBHOOK_ENDPOINT_ID` (اختیاری ولی توصیه‌شده)
+- `OPENAI_API_KEY`
+
+### Webhook
+آدرس Webhook:
+```
+https://YOUR-DOMAIN.com/webhook
+```
+
+در YCloud باید این دو رویداد فعال باشند:
+```
+whatsapp.inbound_message.received
+whatsapp.message.updated
+```
+
+گیرنده، امضای `YCloud-Signature` را روی **بایت‌های خام Body** قبل از JSON parsing بررسی می‌کند و رویدادها را با `event.id` به‌صورت durable dedupe می‌کند. پاسخ `2xx` بعد از پذیرش پایدار برگردانده می‌شود و پردازش پیام بعد از آن انجام می‌شود.
+
+### ارسال
+پیام متنی در حالت YCloud از این API استفاده می‌کند:
+```
+POST /v2/whatsapp/messages
+X-API-Key: <YCLOUD_API_KEY>
+```
+
+برای پاسخ‌های عادی، ارسال صف‌شده استفاده می‌شود. پاسخ `accepted` به معنی تحویل نهایی نیست؛ وضعیت‌های `sent`، `delivered`، `read` و `failed` از طریق `whatsapp.message.updated` دنبال می‌شوند.
+
+### تست بدون ارسال واقعی
+```bash
+npm test
+npm run check
+```
+
+تست‌های YCloud شامل ساخت درخواست، تقدم `to` نسبت به `recipient`، خطای `429` و `Retry-After`، و اعتبارسنجی امضای Webhook است.
 
 ## ویژگی‌ها
 
@@ -144,8 +187,8 @@ curl "http://localhost:3000/api/messages/1234567890?limit=50"
 
 ## چگونه کار می‌کند
 
-1. **Webhook** → Meta فعالیت‌های واتساپ را به URL ما ارسال می‌کند
-2. **Signature Check** → اگر `META_APP_SECRET` تنظیم شده، صحت درخواست را بررسی می‌کنیم
+1. **Webhook** → YCloud رویدادهای واتساپ را به URL ما ارسال می‌کند
+2. **Signature Check** → امضای `YCloud-Signature` قبل از پردازش بررسی می‌شود؛ حالت Meta هم برای fallback حفظ شده است
 3. **Deduplication** → پیام‌های تکراری را برای 24 ساعت نادیده می‌گیریم
 4. **Language Detection** → زبان پیام را تشخیص می‌دهیم
 5. **OpenAI** → متن را به GPT ارسال می‌کنیم
