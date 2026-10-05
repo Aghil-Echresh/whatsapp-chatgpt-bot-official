@@ -208,7 +208,8 @@ app.post('/webhook', async (request, response) => {
     return;
   }
 
-  if (!validSignature({ ...request, rawBody })) return response.sendStatus(401);
+  request.rawBody = rawBody;
+  if (!validSignature(request)) return response.sendStatus(401);
 
   let metaBody;
   try {
