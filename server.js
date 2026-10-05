@@ -464,7 +464,7 @@ async function answerMessage(from, text, { saveUser = true } = {}) {
     return;
   }
 
-  if (/^\\/(reset|new|شروع)\\b/i.test(text)) {
+  if (/^\/(reset|new|شروع)\b/i.test(text)) {
     await resetConversation(from);
     await sendWhatsAppMessage(from, '♻️ گفت‌وگوی قبلی پاک شد. از نو شروع کنیم؟');
     return;
