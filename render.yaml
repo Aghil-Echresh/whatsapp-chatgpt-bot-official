@@ -10,6 +10,22 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: WHATSAPP_PROVIDER
+        value: ycloud
+      - key: YCLOUD_API_KEY
+        sync: false
+      - key: YCLOUD_SENDER_PHONE
+        sync: false
+      - key: YCLOUD_WEBHOOK_SECRET
+        sync: false
+      - key: YCLOUD_WEBHOOK_SECRET_PREVIOUS
+        sync: false
+      - key: YCLOUD_WEBHOOK_ENDPOINT_ID
+        sync: false
+      - key: YCLOUD_SIGNATURE_TOLERANCE_SECONDS
+        value: "300"
+      - key: YCLOUD_API_BASE_URL
+        value: https://api.ycloud.com/v2
       - key: WHATSAPP_TOKEN
         sync: false
       - key: PHONE_NUMBER_ID
