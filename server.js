@@ -4,8 +4,13 @@ import express from 'express';
 import OpenAI from 'openai';
 import { MongoClient } from 'mongodb';
 import { toFile } from 'openai/uploads';
+import { getYCloudClientFromEnv, YCloudError } from './lib/ycloud.js';
+import { extractInboundMessage, extractMessageUpdate, parseYCloudEvent, payloadHash, verifyYCloudSignature } from './lib/ycloud-webhook.js';
 
-const required = ['WHATSAPP_TOKEN', 'PHONE_NUMBER_ID', 'VERIFY_TOKEN', 'OPENAI_API_KEY'];
+const whatsappProvider = (process.env.WHATSAPP_PROVIDER || (process.env.YCLOUD_API_KEY ? 'ycloud' : 'meta')).toLowerCase();
+const required = whatsappProvider === 'ycloud'
+  ? ['YCLOUD_API_KEY', 'YCLOUD_WEBHOOK_SECRET', 'YCLOUD_SENDER_PHONE', 'OPENAI_API_KEY']
+  : ['WHATSAPP_TOKEN', 'PHONE_NUMBER_ID', 'VERIFY_TOKEN', 'OPENAI_API_KEY'];
 const missing = required.filter((name) => !process.env[name]);
 if (missing.length) {
   console.error(`Missing environment variables: ${missing.join(', ')}`);
@@ -20,6 +25,11 @@ const phoneNumberId = process.env.PHONE_NUMBER_ID;
 const verifyToken = process.env.VERIFY_TOKEN;
 const appSecret = process.env.META_APP_SECRET;
 const adminApiToken = process.env.ADMIN_API_TOKEN;
+const ycloudWebhookEndpointId = process.env.YCLOUD_WEBHOOK_ENDPOINT_ID || null;
+const ycloudWebhookTolerance = Number(process.env.YCLOUD_SIGNATURE_TOLERANCE_SECONDS || 300);
+const ycloudWebhookSecrets = [process.env.YCLOUD_WEBHOOK_SECRET, process.env.YCLOUD_WEBHOOK_SECRET_PREVIOUS].filter(Boolean);
+const ycloudSenderPhone = process.env.YCLOUD_SENDER_PHONE;
+const ycloudClient = whatsappProvider === 'ycloud' ? getYCloudClientFromEnv() : null;
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const model = process.env.OPENAI_MODEL || 'gpt-5';
 const transcriptionModel = process.env.OPENAI_TRANSCRIPTION_MODEL || 'gpt-4o-mini-transcribe';
@@ -31,6 +41,11 @@ let mongoClient;
 let messagesCollection;
 let usersCollection;
 let processedCollection;
+let webhookEventsCollection;
+let webhookConflictsCollection;
+let ycloudMessagesCollection;
+const ycloudTransportReplayCache = new Map();
+const ycloudEventMemory = new Map();
 
 const conversations = new Map();
 const processedMessages = new Map();
@@ -50,12 +65,20 @@ async function initializeMongo() {
     messagesCollection = db.collection('messages');
     usersCollection = db.collection('users');
     processedCollection = db.collection('processed_messages');
+    webhookEventsCollection = db.collection('ycloud_webhook_events');
+    webhookConflictsCollection = db.collection('ycloud_webhook_conflicts');
+    ycloudMessagesCollection = db.collection('ycloud_messages');
 
     await messagesCollection.createIndex({ from: 1, createdAt: -1 });
     await messagesCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 86400 * 30 });
     await usersCollection.createIndex({ phone: 1 }, { unique: true });
     await processedCollection.createIndex({ messageId: 1 }, { unique: true });
     await processedCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 172800 });
+    await webhookEventsCollection.createIndex({ endpointId: 1, eventId: 1 }, { unique: true });
+    await webhookEventsCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 86400 });
+    await webhookConflictsCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 604800 });
+    await ycloudMessagesCollection.createIndex({ providerMessageId: 1 }, { unique: true });
+    await ycloudMessagesCollection.createIndex({ to: 1, createdAt: -1 });
 
     console.log('✓ MongoDB connected');
     return true;
@@ -65,11 +88,8 @@ async function initializeMongo() {
   }
 }
 
-app.use(express.json({
-  verify: (request, _response, buffer) => {
-    request.rawBody = buffer;
-  }
-}));
+app.use('/webhook', express.raw({ type: 'application/json', limit: '2mb' }));
+app.use(express.json({ limit: '2mb' }));
 
 function validSignature(request) {
   if (!appSecret) return true;
@@ -134,14 +154,224 @@ app.get('/webhook', (request, response) => {
   return response.status(200).send(request.query['hub.challenge']);
 });
 
-app.post('/webhook', (request, response) => {
-  if (!validSignature(request)) return response.sendStatus(401);
+app.post('/webhook', async (request, response) => {
+  const rawBody = Buffer.isBuffer(request.body) ? request.body : Buffer.from('');
+  const ycloudSignature = request.get('YCloud-Signature');
+
+  if (whatsappProvider === 'ycloud' || ycloudSignature) {
+    if (!ycloudSignature) return response.sendStatus(401);
+
+    const endpointId = request.get('X-Webhook-Endpoint-ID') || null;
+    if (ycloudWebhookEndpointId && endpointId !== ycloudWebhookEndpointId) {
+      return response.sendStatus(401);
+    }
+
+    const verification = verifyYCloudSignature({
+      rawBody,
+      signatureHeader: ycloudSignature,
+      secrets: ycloudWebhookSecrets,
+      toleranceSeconds: ycloudWebhookTolerance
+    });
+
+    if (!verification.valid) {
+      console.warn('Rejected YCloud webhook:', verification.reason);
+      return response.sendStatus(401);
+    }
+
+    const replayKey = String(verification.timestamp) + ':' + verification.signature;
+    if (ycloudTransportReplayCache.has(replayKey)) return response.sendStatus(200);
+    ycloudTransportReplayCache.set(replayKey, Date.now());
+    setTimeout(() => ycloudTransportReplayCache.delete(replayKey), Math.max(300000, ycloudWebhookTolerance * 1000));
+
+    let event;
+    try {
+      event = parseYCloudEvent(rawBody);
+    } catch (error) {
+      console.warn('Invalid YCloud webhook envelope:', error.message);
+      return response.sendStatus(400);
+    }
+
+    const claim = await claimYCloudEvent(event, rawBody, endpointId || 'single-tenant');
+    if (claim === 'conflict') return response.sendStatus(200);
+    if (claim === 'duplicate') return response.sendStatus(200);
+
+    response.sendStatus(200);
+    void processYCloudEvent(event).catch((error) => {
+      console.error('YCloud webhook processing failed:', error);
+    });
+    return;
+  }
+
+  if (!validSignature({ ...request, rawBody })) return response.sendStatus(401);
+
+  let metaBody;
+  try {
+    metaBody = JSON.parse(rawBody.toString('utf8'));
+  } catch {
+    return response.sendStatus(400);
+  }
 
   response.sendStatus(200);
-  void processWebhook(request.body).catch((error) => {
+  void processWebhook(metaBody).catch((error) => {
     console.error('Webhook processing failed:', error);
   });
 });
+
+async function claimYCloudEvent(event, rawBody, endpointId) {
+  const hash = payloadHash(rawBody);
+  const eventId = event.id;
+  const key = endpointId + ':' + eventId;
+
+  if (!webhookEventsCollection) {
+    const existing = ycloudEventMemory.get(key);
+    if (existing) {
+      if (existing !== hash) {
+        console.error('YCloud webhook event conflict:', key);
+        return 'conflict';
+      }
+      return 'duplicate';
+    }
+    ycloudEventMemory.set(key, hash);
+    setTimeout(() => ycloudEventMemory.delete(key), 24 * 60 * 60 * 1000);
+    return 'new';
+  }
+
+  const existing = await webhookEventsCollection.findOne({ endpointId, eventId });
+  if (existing) {
+    if (existing.payloadHash !== hash) {
+      await webhookConflictsCollection.insertOne({
+        endpointId,
+        eventId,
+        existingHash: existing.payloadHash,
+        receivedHash: hash,
+        createdAt: new Date()
+      }).catch(() => {});
+      console.error('YCloud webhook event conflict:', key);
+      return 'conflict';
+    }
+    return 'duplicate';
+  }
+
+  try {
+    await webhookEventsCollection.insertOne({
+      endpointId,
+      eventId,
+      eventType: event.type,
+      payloadHash: hash,
+      receivedAt: new Date(),
+      createdAt: new Date()
+    });
+    return 'new';
+  } catch (error) {
+    if (error?.code === 11000) return 'duplicate';
+    throw error;
+  }
+}
+
+async function processYCloudEvent(event) {
+  const inbound = extractInboundMessage(event);
+
+  if (inbound) {
+    const from = inbound.from;
+    if (!from) return;
+
+    const profile = inbound.customerProfile || {};
+    if (usersCollection) {
+      await usersCollection.updateOne(
+        { phone: from },
+        {
+          $set: {
+            name: profile.name || null,
+            username: profile.username || null,
+            bsuid: inbound.fromUserId || null,
+            parentBsuid: inbound.fromParentUserId || null,
+            lastSeen: new Date()
+          }
+        },
+        { upsert: true }
+      ).catch(() => {});
+    }
+
+    await persistYCloudInbound(inbound, event);
+
+    if (inbound.type === 'text') {
+      const text = inbound.text?.body?.trim();
+      if (text) {
+        await answerMessage(from, text);
+        return;
+      }
+    }
+
+    if (inbound.type === 'button') {
+      const buttonText = inbound.button?.text?.trim() || inbound.button?.payload?.trim();
+      if (buttonText) {
+        await answerMessage(from, buttonText);
+        return;
+      }
+    }
+
+    await safeSend(from, 'پیامت دریافت شد ❤️ فعلاً پاسخ هوشمند من برای پیام‌های متنی فعاله. پیام متنی بفرست تا ادامه بدیم.');
+    return;
+  }
+
+  const update = extractMessageUpdate(event);
+  if (update?.id) {
+    await recordYCloudMessageUpdate(update, event);
+    return;
+  }
+
+  console.log('YCloud event received and stored as unsupported:', event.type);
+}
+
+async function persistYCloudInbound(inbound, event) {
+  if (!messagesCollection) return;
+  const content = inbound.type === 'text'
+    ? inbound.text?.body || ''
+    : inbound.type === 'button'
+      ? (inbound.button?.text || inbound.button?.payload || '')
+      : '[' + inbound.type + ']';
+
+  await messagesCollection.insertOne({
+    from: inbound.from,
+    role: 'user',
+    content,
+    provider: 'ycloud',
+    providerMessageId: inbound.id || null,
+    wamid: inbound.wamid || null,
+    externalEventId: event.id,
+    createdAt: new Date(inbound.sendTime || event.createTime || Date.now())
+  }).catch(() => {});
+}
+
+async function recordYCloudMessageUpdate(update, event) {
+  if (!ycloudMessagesCollection) return;
+
+  await ycloudMessagesCollection.updateOne(
+    { providerMessageId: update.id },
+    {
+      $set: {
+        status: update.status || 'unknown',
+        updateTime: update.updateTime || event.createTime || null,
+        sendTime: update.sendTime || null,
+        deliverTime: update.deliverTime || null,
+        readTime: update.readTime || null,
+        errorCode: update.errorCode || null,
+        errorMessage: update.errorMessage || null,
+        pricingCategory: update.pricingCategory || null,
+        totalPrice: update.totalPrice ?? null,
+        currency: update.currency || null,
+        lastEventId: event.id,
+        lastUpdatedAt: new Date()
+      },
+      $setOnInsert: {
+        provider: 'ycloud',
+        providerMessageId: update.id,
+        createdAt: new Date()
+      }
+    },
+    { upsert: true }
+  );
+}
 
 async function processWebhook(body) {
   if (body.object !== 'whatsapp_business_account') return;
@@ -356,6 +586,7 @@ async function safeSend(to, body) {
 }
 
 async function sendTypingIndicator(to) {
+  if (whatsappProvider === 'ycloud') return;
   const url = `https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`;
   try {
     await fetch(url, {
@@ -393,11 +624,52 @@ async function isMessageProcessed(messageId) {
 }
 
 async function sendWhatsAppMessage(to, body) {
-  const url = `https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`;
+  if (whatsappProvider === 'ycloud') {
+    const externalId = 'chat-' + Date.now() + '-' + crypto.randomUUID();
+    let result;
+    try {
+      result = await ycloudClient.sendText({
+        from: ycloudSenderPhone,
+        to,
+        body,
+        externalId
+      });
+    } catch (error) {
+      if (error instanceof YCloudError) {
+        console.error('YCloud send failed:', {
+          status: error.status,
+          code: error.code,
+          requestId: error.requestId,
+          retryAfter: error.retryAfter
+        });
+      }
+      throw error;
+    }
+
+    const providerMessageId = result?.id || null;
+    if (ycloudMessagesCollection && providerMessageId) {
+      await ycloudMessagesCollection.insertOne({
+        provider: 'ycloud',
+        providerMessageId,
+        externalId,
+        from: ycloudSenderPhone,
+        to,
+        body,
+        status: result?.status || 'accepted',
+        createdAt: new Date()
+      }).catch(async (error) => {
+        if (error?.code !== 11000) throw error;
+      });
+    }
+
+    return result;
+  }
+
+  const url = 'https://graph.facebook.com/' + graphVersion + '/' + phoneNumberId + '/messages';
   const result = await fetch(url, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${whatsappToken}`,
+      Authorization: 'Bearer ' + whatsappToken,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
@@ -411,8 +683,10 @@ async function sendWhatsAppMessage(to, body) {
 
   if (!result.ok) {
     const details = await result.text();
-    throw new Error(`WhatsApp send failed (${result.status}): ${details}`);
+    throw new Error('WhatsApp send failed (' + result.status + '): ' + details);
   }
+
+  return await result.json();
 }
 
 app.get('/api/users/:phone/stats', async (request, response) => {
@@ -428,6 +702,27 @@ app.get('/api/users/:phone/stats', async (request, response) => {
     response.json({ user, messageCount });
   } catch (error) {
     response.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/whatsapp/messages/:id', async (request, response) => {
+  if (!requireAdmin(request, response)) return;
+
+  if (whatsappProvider !== 'ycloud') {
+    return response.status(404).json({ error: 'YCloud provider is not active' });
+  }
+
+  try {
+    const message = await ycloudClient.retrieveMessage(request.params.id);
+    return response.json(message);
+  } catch (error) {
+    if (error instanceof YCloudError) {
+      return response.status(error.status || 502).json({
+        error: error.code || 'YCLOUD_ERROR',
+        requestId: error.requestId || null
+      });
+    }
+    return response.status(502).json({ error: 'YCloud request failed' });
   }
 });
 
