@@ -144,7 +144,7 @@ function allowRequest(phone) {
 }
 
 app.get('/health', (_request, response) => {
-  response.json({ ok: true, service: 'whatsapp-chatgpt-bot', mongodb: !!mongoClient });
+  response.json({ ok: true, service: 'whatsapp-chatgpt-bot', provider: whatsappProvider, mongodb: !!mongoClient });
 });
 
 app.get('/webhook', (request, response) => {
@@ -191,7 +191,13 @@ app.post('/webhook', async (request, response) => {
       return response.sendStatus(400);
     }
 
-    const claim = await claimYCloudEvent(event, rawBody, endpointId || 'single-tenant');
+    let claim;
+    try {
+      claim = await claimYCloudEvent(event, rawBody, endpointId || 'single-tenant');
+    } catch (error) {
+      console.error('YCloud webhook persistence failed:', error.message);
+      return response.sendStatus(503);
+    }
     if (claim === 'conflict') return response.sendStatus(200);
     if (claim === 'duplicate') return response.sendStatus(200);
 
@@ -297,7 +303,7 @@ async function processYCloudEvent(event) {
     if (inbound.type === 'text') {
       const text = inbound.text?.body?.trim();
       if (text) {
-        await answerMessage(from, text);
+        await answerMessage(from, text, { saveUser: false });
         return;
       }
     }
@@ -305,7 +311,7 @@ async function processYCloudEvent(event) {
     if (inbound.type === 'button') {
       const buttonText = inbound.button?.text?.trim() || inbound.button?.payload?.trim();
       if (buttonText) {
-        await answerMessage(from, buttonText);
+        await answerMessage(from, buttonText, { saveUser: false });
         return;
       }
     }
@@ -452,7 +458,7 @@ async function saveMessage(from, role, content) {
   conversations.set(from, updated);
 }
 
-async function answerMessage(from, text) {
+async function answerMessage(from, text, { saveUser = true } = {}) {
   if (!allowRequest(from)) {
     await sendWhatsAppMessage(from, '⏳ تعداد پیام‌ها در این دقیقه زیاد است. لطفاً کمی بعد دوباره تلاش کنید.');
     return;
@@ -468,7 +474,7 @@ async function answerMessage(from, text) {
     const welcome = /[\\u0600-\\u06FF]/.test(text)
       ? 'سلام 👋 من دستیار هوش مصنوعی واتساپ هستم. متن، عکس، فایل و پیام صوتی بفرست.'
       : 'Hi 👋 I am your WhatsApp AI assistant. Send text, images, files or voice messages.';
-    await saveMessage(from, 'user', text);
+    if (saveUser) await saveMessage(from, 'user', text);
     await saveMessage(from, 'assistant', welcome);
     await sendWhatsAppMessage(from, welcome);
     return;
@@ -484,7 +490,7 @@ async function answerMessage(from, text) {
     });
 
     const answer = response.output_text?.trim() || 'متأسفم، نتوانستم پاسخ مناسبی تولید کنم.';
-    await saveMessage(from, 'user', text);
+    if (saveUser) await saveMessage(from, 'user', text);
     await saveMessage(from, 'assistant', answer);
     await sendWhatsAppMessage(from, answer);
   } catch (error) {
